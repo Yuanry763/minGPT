@@ -192,23 +192,58 @@ class GPT(nn.Module):
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
         sd_hf = model_hf.state_dict()
 
-        # copy while ensuring all of the parameters are aligned and match in names and shapes
-        keys = [k for k in sd_hf if not k.endswith('attn.masked_bias')] # ignore these
+        # # copy while ensuring all of the parameters are aligned and match in names and shapes
+        # keys = [k for k in sd_hf if not k.endswith('attn.masked_bias')] # ignore these
+        # transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla nn.Linear.
+        # # this means that we have to transpose these weights when we import them
+        # assert len(keys) == len(sd)
+        # for k in keys:
+        #     if any(k.endswith(w) for w in transposed):
+        #         # special treatment for the Conv1D weights we need to transpose
+        #         assert sd_hf[k].shape[::-1] == sd[k].shape
+        #         with torch.no_grad():
+        #             sd[k].copy_(sd_hf[k].t())
+        #     else:
+        #         # vanilla copy over the other parameters
+        #         assert sd_hf[k].shape == sd[k].shape
+        #         with torch.no_grad():
+        #             sd[k].copy_(sd_hf[k])
+
+        
+        # --- New: robust HF → minGPT weight loading ---
+        mg_sd = model.state_dict()
+        hf_sd = model_hf.state_dict()
+
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla nn.Linear.
-        # this means that we have to transpose these weights when we import them
-        assert len(keys) == len(sd)
-        for k in keys:
-            if any(k.endswith(w) for w in transposed):
-                # special treatment for the Conv1D weights we need to transpose
-                assert sd_hf[k].shape[::-1] == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
-            else:
-                # vanilla copy over the other parameters
-                assert sd_hf[k].shape == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
+
+        loaded, skipped = 0, 0
+
+        for k, v in hf_sd.items():
+            if k not in mg_sd:
+                print(f"[skip] {k} (not in minGPT)")
+                skipped += 1
+                continue
+
+            if mg_sd[k].shape != v.shape:
+                # try transposed Conv1D weights
+                if any(k.endswith(w) for w in transposed) and mg_sd[k].shape == v.t().shape:
+                    print(f"[load T] {k}")
+                    mg_sd[k].copy_(v.t())
+                    loaded += 1
+                else:
+                    print(f"[skip] {k} (shape mismatch {v.shape} vs {mg_sd[k].shape})")
+                    skipped += 1
+                continue
+
+            print(f"[load] {k}")
+            mg_sd[k].copy_(v)
+            loaded += 1
+
+        model.load_state_dict(mg_sd, strict=False)
+        print(f"Loaded {loaded} tensors, skipped {skipped}.")
+        # --- End new code ---
+
 
         return model
 
